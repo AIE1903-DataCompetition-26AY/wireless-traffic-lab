@@ -1,0 +1,23 @@
+# Never commit real course data, locally generated data, environments or runs.
+/data/*
+!/data/README.md
+!/data/DATA_INFO_TEMPLATE.md
+/runs/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.env
+.env.*
+*.pt
+*.pth
+*.pkl
+*.pickle
+*.csv
+*.parquet
+*.npy
+*.npz
+*.zip
+.DS_Store
+Thumbs.db
