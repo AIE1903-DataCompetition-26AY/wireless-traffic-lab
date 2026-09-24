@@ -78,9 +78,7 @@ course-projects/
     │   ├── train_lstm.py
     │   ├── compare_results.py
     │   └── make_demo_data.py
-    ├── data/                    # 本地产物，不提交 Git
-    ├── docs/                    # 学生 / 教师 / 方法 / 接入 / 验证说明
-    └── tests/
+    └──  data/                    # 本地产物，不提交 Git
 ```
 
 ## 进阶操作与测试
