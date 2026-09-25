@@ -4,11 +4,9 @@
 
 **课程数据仓库已确定：[competition-data](https://github.com/AIE1903-DataCompetition-26AY/competition-data)。** 代码与数据分开存放；此代码包不重新分发真实数据。
 
-> 2026-09-24 更新：已读取数据仓库首页和 README，确认目录与任务概况；当前环境未成功下载具体数据文件或读取各目录 PDF。因此新增的是带检查的 CSV 接入流程，**不是已经通过真实数据验证的专用解析器**。真实文件名、字段、单位与竞赛提交规则仍需对照下载后的文件确认。[验证范围](docs/VALIDATION.md)。
-
 ## 两个入口，共用同一份数据
 
-`lab/train_arima.py` 是传统统计模型入口；`lab/train_lstm.py` 保留原教师示例的 LSTM 结构与主要训练流程。两者共享读取、时间切分、变换、测试时间点与评价指标。
+`lab/train_arima.py` 是传统统计模型入口；`lab/train_lstm.py` 是 LSTM 结构与主要训练流程。两者共享读取、时间切分、变换、测试时间点与评价指标。
 
 本仓库做的是**公开训练数据内部的课堂回测**：按时间分 60% / 20% / 20%，对一个节点滚动预测下一 5 分钟点。LSTM 输入最近 12 点；ARIMA 保留更长的历史滤波状态。二者不是严格匹配历史长度的消融实验。
 
@@ -16,9 +14,9 @@
 
 ## 从哪里开始
 
-新手从 [学生逐步操作手册](docs/STUDENT_GUIDE.md) 开始。教师查看 [发布指南](docs/INSTRUCTOR_GUIDE.md)。[课程数据接入说明](docs/COURSE_DATA.md) 汇总已确认内容和未确认事项；[方法说明](docs/METHODS.md) 解释模型和回测协议。
+新手从 [学生逐步操作手册](docs/STUDENT_GUIDE.md) 开始。
 
-代码仓库计划使用 `AIE1903-DataCompetition-26AY/wireless-traffic-lab`，**这是建议名称，本次没有创建或上传该远端**。以下命令从本代码包的根目录执行，先按学生手册创建环境、安装依赖。
+代码仓库使用 `AIE1903-DataCompetition-26AY/wireless-traffic-lab`。以下命令从本代码包的根目录执行，先按学生手册创建环境、安装依赖。
 
 ## 从真实的数据仓库开始
 
@@ -78,7 +76,8 @@ course-projects/
     │   ├── train_lstm.py
     │   ├── compare_results.py
     │   └── make_demo_data.py
-    └──  data/                    # 本地产物，不提交 Git
+    ├──  data/                    # 本地产物，不提交 Git
+    └──  docs/
 ```
 
 ## 进阶操作与测试
