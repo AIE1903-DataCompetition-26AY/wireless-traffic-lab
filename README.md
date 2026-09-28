@@ -39,7 +39,7 @@ python lab/check_data.py --csv data/course_traffic.csv --target traffic
 
 ```bash
 python lab/train_arima.py --csv data/course_traffic.csv --target traffic --order 1 1 1 --out runs/course_arima
-python lab/train_lstm.py --csv data/course_traffic.csv --target traffic --epochs 3 --device cpu --out runs/course_lstm
+python lab/train_lstm.py --csv data/course_traffic.csv --target traffic --epochs 3 --device cuda --out runs/course_lstm
 python lab/compare_results.py --lstm-dir runs/course_lstm --arima-dir runs/course_arima --out runs/course_comparison
 ```
 
@@ -50,7 +50,7 @@ python lab/compare_results.py --lstm-dir runs/course_lstm --arima-dir runs/cours
 ```bash
 python lab/make_demo_data.py
 python lab/train_arima.py --csv data/demo_traffic.csv --target cell_A --out runs/demo_arima
-python lab/train_lstm.py --csv data/demo_traffic.csv --target cell_A --epochs 3 --device cpu --out runs/demo_lstm
+python lab/train_lstm.py --csv data/demo_traffic.csv --target cell_A --epochs 3 --device cuda --out runs/demo_lstm
 python lab/compare_results.py --lstm-dir runs/demo_lstm --arima-dir runs/demo_arima --out runs/demo_comparison
 ```
 
