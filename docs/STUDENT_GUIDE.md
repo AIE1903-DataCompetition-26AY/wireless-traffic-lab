@@ -6,6 +6,8 @@
 
 你不需要先掌握神经网络全部理论，也不一定使用 GPU。本教学示例可以选择 CPU 运行。首次只研究一个节点，不要一开始就把全部节点同时跑一遍。
 
+课堂怎么讲、这次已经跑出的表和图，写在 [讲演稿](LECTURE.md)。本手册只负责把程序跑通。
+
 代码仓库和数据仓库不是同一件事：课程数据已经发布在 [AIE1903-DataCompetition-26AY/competition-data](https://github.com/AIE1903-DataCompetition-26AY/competition-data)，需要单独 clone；本代码包不重复打包真实数据。
 
 本代码仓库发布在 [AIE1903-DataCompetition-26AY/wireless-traffic-lab](https://github.com/AIE1903-DataCompetition-26AY/wireless-traffic-lab)。`cell_A` 只出现在人工数据例子；真实数据会通过接入脚本生成统一的 `traffic` 列。
@@ -370,7 +372,7 @@ MAE 与 RMSE 都越小越好，单位跟 CSV 流量列相同。RMSE 对较大误
 
 一次预测使用的信息要区分时间：预测 10:05 时可以用截至 10:00 的历史；10:05 真值到达后，预测 10:10 时可以把 10:05 放进历史。
 
-这叫**滚动一步预测**，本实验在公开训练历史内部模拟这一过程。它不等于在 10:00 就把之后整天全部预测好。本代码没有后一种多步开环评估；没有未来标签的竞赛测试阶段不能照搬逐点读真值的实现。
+这叫**滚动一步预测**，本实验在公开训练历史内部模拟这一过程。它不等于在 10:00 就把之后整天全部预测好。`analyze_forecasts.py` 另外做开环：从某个时刻起，后面若干步把预测填回输入，不再读入真实值。两套分数分开记。没有未来标签的竞赛测试阶段不能照搬逐点读真值的实现。
 
 两种模型都只在训练集估计参数。LSTM 用验证集决定何时早停和选哪一轮；ARIMA 开启搜索时用验证集选阶。测试目标不参与这些选择。
 
@@ -404,17 +406,53 @@ python lab/train_lstm.py --csv data/course_traffic.csv --target traffic --hidden
 
 一次只改一个设置，记录原因和验证集结果。正式比较前固定数据版本、节点、时间划分、预处理和训练设置。
 
-### 10.4 查看帮助
+### 10.4 用同样的设置跑一层普通 RNN
+
+`lab/train_rnn.py` 和 LSTM 使用同一条序列、同一种切分、同样的 12 步输入和同样的训练超参。循环单元换成 `nn.RNN`，默认激活是 `tanh`。每个窗口的初始隐状态仍是 0。它还是单节点模型，不会读入其他小区。
+
+和已经选中的 LSTM 比较时，隐藏维、学习率、轮数、批大小和种子保持一致，只换这一个结构：
+
+```bash
+python lab/train_rnn.py --csv data/course_traffic.csv --target traffic --hidden-size 64 --lr 0.001 --device cpu --out runs/cell30_rnn
+python lab/compare_results.py --lstm-dir runs/cell30_lstm_sweep/h64_lr1e-3 --arima-dir runs/cell30_arima_search --rnn-dir runs/cell30_rnn --out runs/cell30_with_rnn
+```
+
+`--rnn-dir` 可以不写；不写时比较图里仍然只有持久性、ARIMA 和 LSTM。
+
+### 10.5 查看帮助
 
 ```bash
 python lab/train_arima.py --help
 python lab/train_lstm.py --help
+python lab/train_rnn.py --help
 python lab/compare_results.py --help
 ```
 
 不要只把最后一层输出维度改成 12，就声称已实现“预测未来 12 步”；那还需要同时修改标签、边界检查、指标和推理流程。
 
-## 11. 常见问题排查
+## 11. 调参之后把预测拆开看
+
+跑通单个模型之后，用下面三条命令完成课堂要求的对比。第一条在验证集上比较 ARIMA 阶数；第二条一次只改 LSTM 的隐藏维或学习率；第三条画图，并写出每个片段该看什么。第三条不根据测试集更换已经选定的模型。
+
+```bash
+python lab/train_arima.py --csv data/course_traffic.csv --target traffic --search --engine fast --out runs/cell30_arima_search
+python lab/sweep_lstm.py --csv data/course_traffic.csv --target traffic --device cpu --out runs/cell30_lstm_sweep
+python lab/analyze_forecasts.py --csv data/course_traffic.csv --target traffic --arima-dir runs/cell30_arima_search --lstm-root runs/cell30_lstm_sweep --out runs/cell30_session
+```
+
+先读 [讲演稿](LECTURE.md)，对照 `runs/cell30_session/` 里的图。实验记录里要有：验证集上你保留了哪一组、测试集只报告了一次的分数、以及至少一个预测明显偏离的时间戳和你对它的解释。
+
+单通道模型都跑通之后，再训练 30 列联合模型。下面的 VAR 在验证集上比较滞后 1、2、3。联合 LSTM 先用和单通道选中模型相同的隐藏维 64、学习率 `0.001`；若要比较超参，另开目录只改其中一项。`analyze_joint.py` 不会改写单通道结果，它把两边放到 `Cell_001` 的同一批时间戳上。
+
+```bash
+python lab/train_var.py --csv ../competition-data/cell_30/cell_30_train.csv --lags 1 2 3 --out runs/cell30_var
+python lab/train_lstm_multi.py --csv ../competition-data/cell_30/cell_30_train.csv --hidden-size 64 --lr 0.001 --device cpu --out runs/cell30_lstm_multi/h64_lr1e-3
+python lab/analyze_joint.py --csv ../competition-data/cell_30/cell_30_train.csv --var-dir runs/cell30_var --lstm-root runs/cell30_lstm_multi --uni-arima-dir runs/cell30_arima_search --uni-lstm-dir runs/cell30_lstm_sweep/h64_lr1e-3 --focus-cell Cell_001 --out runs/cell30_joint
+```
+
+打开 `runs/cell30_joint/读图说明.md`，并对照 [讲演稿](LECTURE.md) 里的联合预测一节。记录里要同时有 30 列平均 MAE 和至少两个小区的曲线：一个联合模型好于持久性，一个更差。换小区或改切分之后必须重跑，不能把上一次的数字抄进报告。
+
+## 12. 常见问题排查
 
 | 现象                         | 优先检查                                                     |
 | ---------------------------- | ------------------------------------------------------------ |
@@ -437,7 +475,7 @@ python lab/compare_results.py --help
 
 求助时附上执行命令、Python 版本、报错最后几行和不含敏感数据的必要信息。不要只发送“跑不了”，也不要把整个真实数据文件上传到公开讨论区。
 
-## 12. 保存与提交实验记录
+## 13. 保存与提交实验记录
 
 先在本地记录：使用的数据版本、节点、单位、运行命令、选阶/早停依据、两种模型与 Persistence 的结果，以及你对误差的解释。只提交教师允许公开或在课程内共享的内容。
 
