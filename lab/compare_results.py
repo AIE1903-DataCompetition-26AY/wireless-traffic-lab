@@ -29,11 +29,16 @@ def load_predictions(directory: Path, model: str) -> tuple[pd.DataFrame, dict]:
     return frame, config
 
 
-def align_predictions(lstm: pd.DataFrame, arima: pd.DataFrame,
-                      lstm_config: dict, arima_config: dict) -> pd.DataFrame:
+def same_experiment(left: dict, right: dict, label: str) -> None:
     for key in ("target", "time_column", "data_sha256"):
-        if key not in lstm_config or key not in arima_config or lstm_config[key] != arima_config[key]:
-            raise ValueError(f"Runs do not use the same {key}; rerun both models on the same data.")
+        if key not in left or key not in right or left[key] != right[key]:
+            raise ValueError(f"{label} does not use the same {key}; rerun on the same data.")
+
+
+def align_predictions(lstm: pd.DataFrame, arima: pd.DataFrame,
+                      lstm_config: dict, arima_config: dict,
+                      rnn: pd.DataFrame | None = None, rnn_config: dict | None = None) -> pd.DataFrame:
+    same_experiment(lstm_config, arima_config, "ARIMA")
     if not lstm["timestamp"].equals(arima["timestamp"]):
         raise ValueError("Test timestamps differ. Do not compare metrics on different test samples.")
     for key in ("actual", "persistence"):
@@ -41,13 +46,25 @@ def align_predictions(lstm: pd.DataFrame, arima: pd.DataFrame,
             raise ValueError(f"Runs disagree on {key} values.")
     result = lstm.copy()
     result["arima"] = arima["arima"].to_numpy()
-    return result[["timestamp", "actual", "persistence", "arima", "lstm"]]
+    columns = ["timestamp", "actual", "persistence", "arima", "lstm"]
+    if rnn is not None and rnn_config is not None:
+        same_experiment(lstm_config, rnn_config, "RNN")
+        if not rnn["timestamp"].equals(result["timestamp"]):
+            raise ValueError("RNN test timestamps differ from LSTM.")
+        for key in ("actual", "persistence"):
+            if not np.allclose(rnn[key], result[key], rtol=1e-10, atol=1e-10):
+                raise ValueError(f"RNN disagrees with LSTM on {key} values.")
+        result["rnn"] = rnn["rnn"].to_numpy()
+        columns.append("rnn")
+    return result[columns]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lstm-dir", type=Path, required=True)
     parser.add_argument("--arima-dir", type=Path, required=True)
+    parser.add_argument("--rnn-dir", type=Path, default=None,
+                        help="Optional train_rnn.py directory on the same series and split.")
     parser.add_argument("--out", type=Path, default=Path("runs/comparison"))
     parser.add_argument("--plot-points", type=int, default=288,
                         help="Plot the earliest N scored test points; metrics use ALL scored points.")
@@ -57,10 +74,14 @@ def main() -> None:
     ensure_new_output(args.out)
     lstm, lc = load_predictions(args.lstm_dir, "lstm")
     arima, ac = load_predictions(args.arima_dir, "arima")
-    combined = align_predictions(lstm, arima, lc, ac)
+    rnn, rc = (None, None)
+    if args.rnn_dir is not None:
+        rnn, rc = load_predictions(args.rnn_dir, "rnn")
+    combined = align_predictions(lstm, arima, lc, ac, rnn, rc)
+    model_names = ["persistence", "arima", "lstm"] + (["rnn"] if "rnn" in combined.columns else [])
     rows = [{"model": model, **calculate_metrics(combined["actual"].to_numpy(),
                                                 combined[model].to_numpy())}
-            for model in ("persistence", "arima", "lstm")]
+            for model in model_names]
     table = pd.DataFrame(rows)
     args.out.mkdir(parents=True, exist_ok=True)
     combined.to_csv(args.out / "predictions_aligned.csv", index=False)
@@ -70,7 +91,9 @@ def main() -> None:
     dense_index = pd.date_range(subset.index[0], subset.index[-1], freq="5min")
     subset = subset.reindex(dense_index)
     fig, ax = plt.subplots(figsize=(12, 4.5), constrained_layout=True)
-    for column in ("actual", "persistence", "arima", "lstm"):
+    for column in ("actual", "persistence", "arima", "lstm", "rnn"):
+        if column not in subset.columns:
+            continue
         ax.plot(subset.index, subset[column], label=column, linewidth=1.2)
     ax.set_title(f"Rolling one-step forecasts | {lc['target']} | first {min(args.plot_points, len(combined))} scored points")
     ax.set_xlabel("Target timestamp")
@@ -94,6 +117,18 @@ def main() -> None:
         ax.legend()
         ax.grid(True, alpha=0.25)
         fig.savefig(args.out / "lstm_learning_curve.png", dpi=200)
+        plt.close(fig)
+    if args.rnn_dir is not None and (args.rnn_dir / "history.csv").is_file():
+        history = pd.read_csv(args.rnn_dir / "history.csv")
+        fig, ax = plt.subplots(figsize=(8, 4.5), constrained_layout=True)
+        ax.plot(history["epoch"], history["train_mse"], label="Training (online epoch average)")
+        ax.plot(history["epoch"], history["validation_mse"], label="Validation (fixed checkpoint)")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("MSE (standardized log space)")
+        ax.set_title("RNN learning curves")
+        ax.legend()
+        ax.grid(True, alpha=0.25)
+        fig.savefig(args.out / "rnn_learning_curve.png", dpi=200)
         plt.close(fig)
     print(table.to_string(index=False))
     print("Metrics use every scored test point; the forecast plot shows only the chosen prefix.")

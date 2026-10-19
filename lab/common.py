@@ -48,6 +48,70 @@ class Scaler:
         return np.maximum(raw, 0.0)
 
 
+@dataclass(frozen=True)
+class ChannelScaler:
+    """每个通道各自 log1p 再标准化。均值和标准差只来自训练段。"""
+    mean: tuple[float, ...]
+    scale: tuple[float, ...]
+
+    @classmethod
+    def fit(cls, raw_train: np.ndarray) -> "ChannelScaler":
+        observed = np.asarray(raw_train, dtype=np.float64)
+        if observed.ndim != 2 or observed.shape[0] < 2 or observed.shape[1] < 2:
+            raise ValueError("Joint training needs at least two channels and two training rows.")
+        finite = observed[np.isfinite(observed)]
+        if finite.size < 2 or np.any(finite < 0):
+            raise ValueError("Need nonnegative traffic. Missing values may be NaN.")
+        logged = np.log1p(observed)
+        count = np.isfinite(logged).sum(axis=0)
+        if np.any(count < 2):
+            raise ValueError("Each channel needs at least two finite training observations.")
+        mean = np.nanmean(logged, axis=0)
+        scale = np.maximum(np.nanstd(logged, axis=0), 1e-8)
+        if not np.isfinite(mean).all() or not np.isfinite(scale).all():
+            raise ValueError("Channel scaler is not finite.")
+        return cls(tuple(float(v) for v in mean), tuple(float(v) for v in scale))
+
+    def transform(self, raw: np.ndarray) -> np.ndarray:
+        logged = np.log1p(np.asarray(raw, dtype=np.float64))
+        return ((logged - np.asarray(self.mean)) / np.asarray(self.scale)).astype(np.float32)
+
+    def inverse(self, normalized: np.ndarray) -> np.ndarray:
+        with np.errstate(over="raise", invalid="raise"):
+            raw = np.expm1(np.asarray(normalized, dtype=np.float64) * np.asarray(self.scale)
+                           + np.asarray(self.mean))
+        if not np.isfinite(raw).all():
+            raise ValueError("Non-finite joint forecast after inverse transform.")
+        return np.maximum(raw, 0.0)
+
+
+def _datetime_index(frame: pd.DataFrame, time_column: str) -> pd.DatetimeIndex:
+    if pd.api.types.is_numeric_dtype(frame[time_column]):
+        raise ValueError("Use readable datetime strings, not an ambiguous numeric timestamp. "
+                         "Convert Unix timestamps with the correct unit before running.")
+    times = pd.to_datetime(frame[time_column], errors="raise")
+    if times.isna().any() or times.duplicated().any():
+        raise ValueError("Timestamps must be present and unique. Resolve duplicates first.")
+    if not pd.api.types.is_datetime64_any_dtype(times.dtype):
+        raise ValueError("Use one consistent timezone; mixed timezones are unsupported.")
+    return pd.DatetimeIndex(times)
+
+
+def _reindex_five_minutes(frame: pd.DataFrame) -> pd.DataFrame:
+    frame = frame.sort_index()
+    if len(frame) < 2:
+        raise ValueError("CSV contains too few observations.")
+    step = pd.Timedelta(FREQUENCY)
+    if np.any((frame.index - frame.index[0]).asi8 % step.value != 0):
+        raise ValueError("Timestamps are not aligned on a common 5-minute grid.")
+    grid_length = int((frame.index[-1] - frame.index[0]) // step) + 1
+    if grid_length > MAX_TIME_POINTS:
+        raise ValueError("Reindexed timeline would exceed 5,000,000 points. Check timestamps "
+                         "or ask the instructor to provide a smaller teaching subset.")
+    index = pd.date_range(frame.index[0], frame.index[-1], freq=FREQUENCY)
+    return frame.reindex(index)
+
+
 def load_series(csv: Path, target: str, time_column: str = "timestamp") -> pd.Series:
     """读取已聚合的宽表，只加载时间列与指定节点列。"""
     if target == time_column:
@@ -60,29 +124,31 @@ def load_series(csv: Path, target: str, time_column: str = "timestamp") -> pd.Se
         raise ValueError(f"CSV is missing columns: {sorted(missing)}. "
                          f"Available columns: {list(header.columns)}")
     frame = pd.read_csv(csv, usecols=[time_column, target], encoding="utf-8-sig")
-    if pd.api.types.is_numeric_dtype(frame[time_column]):
-        raise ValueError("Use readable datetime strings, not an ambiguous numeric timestamp. "
-                         "Convert Unix timestamps with the correct unit before running.")
-    times = pd.to_datetime(frame[time_column], errors="raise")
-    if times.isna().any() or times.duplicated().any():
-        raise ValueError("Timestamps must be present and unique. Resolve duplicates first.")
-    if not pd.api.types.is_datetime64_any_dtype(times.dtype):
-        raise ValueError("Use one consistent timezone; mixed timezones are unsupported.")
     values = pd.to_numeric(frame[target], errors="raise").to_numpy(dtype=np.float64)
     if np.isinf(values).any() or np.any(values[np.isfinite(values)] < 0):
         raise ValueError("Traffic must be nonnegative and finite; missing values may be NaN.")
-    series = pd.Series(values, index=pd.DatetimeIndex(times), name=target).sort_index()
-    if len(series) < 2:
-        raise ValueError("CSV contains too few observations.")
-    step = pd.Timedelta(FREQUENCY)
-    if np.any((series.index - series.index[0]).asi8 % step.value != 0):
-        raise ValueError("Timestamps are not aligned on a common 5-minute grid.")
-    grid_length = int((series.index[-1] - series.index[0]) // step) + 1
-    if grid_length > MAX_TIME_POINTS:
-        raise ValueError("Reindexed timeline would exceed 5,000,000 points. Check timestamps "
-                         "or ask the instructor to provide a smaller teaching subset.")
-    index = pd.date_range(series.index[0], series.index[-1], freq=FREQUENCY)
-    return series.reindex(index)
+    series = pd.Series(values, index=_datetime_index(frame, time_column), name=target)
+    return _reindex_five_minutes(series.to_frame())[target]
+
+
+def load_wide(csv: Path, time_column: str = "timestamp") -> pd.DataFrame:
+    """读取宽表里除时间列以外的全部通道，并放到同一个 5 分钟网格上。"""
+    if not csv.is_file():
+        raise ValueError(f"CSV not found: {csv}. Check --csv and your working directory.")
+    header = pd.read_csv(csv, nrows=0, encoding="utf-8-sig")
+    if time_column not in header.columns:
+        raise ValueError(f"CSV is missing the time column {time_column}. "
+                         f"Available columns: {list(header.columns)}")
+    channels = [column for column in header.columns if column != time_column]
+    if len(channels) < 2:
+        raise ValueError("Joint models need at least two traffic channels.")
+    frame = pd.read_csv(csv, usecols=[time_column, *channels], encoding="utf-8-sig")
+    values = frame[channels].apply(pd.to_numeric, errors="raise")
+    array = values.to_numpy(dtype=np.float64)
+    if np.isinf(array).any() or np.any(array[np.isfinite(array)] < 0):
+        raise ValueError("Traffic must be nonnegative and finite; missing values may be NaN.")
+    wide = pd.DataFrame(array, index=_datetime_index(frame, time_column), columns=channels)
+    return _reindex_five_minutes(wide)
 
 
 def split_ranges(length: int) -> dict[str, tuple[int, int]]:
@@ -92,6 +158,14 @@ def split_ranges(length: int) -> dict[str, tuple[int, int]]:
     if any(stop - start <= LOOKBACK for start, stop in splits.values()):
         raise ValueError("Each time split must contain at least 13 measurements.")
     return splits
+
+
+def valid_row_targets(values: np.ndarray, start: int, stop: int) -> np.ndarray:
+    """多通道计分点：窗口内每个通道都有效，规则与单通道的 12 对 1 相同。"""
+    if values.ndim != 2:
+        raise ValueError("Joint windows expect a time-by-channel array.")
+    proxy = np.where(np.isfinite(values).all(axis=1), 0.0, np.nan)
+    return valid_target_indices(proxy, start, stop)
 
 
 def valid_target_indices(values: np.ndarray, start: int, stop: int) -> np.ndarray:
@@ -136,11 +210,24 @@ def ensure_new_output(path: Path) -> None:
         raise ValueError("Output directory must be new or empty. Use a different --out path.")
 
 
+def _canonical_csv(frame: pd.DataFrame) -> str:
+    csv_kwargs = {"index": True, "date_format": "%Y-%m-%dT%H:%M:%S%z",
+                  "float_format": "%.17g", "na_rep": "NaN"}
+    # pandas 1.5 起参数名是 lineterminator；更早的版本只接受 line_terminator。
+    try:
+        return frame.to_csv(lineterminator="\n", **csv_kwargs)
+    except TypeError:
+        return frame.to_csv(line_terminator="\n", **csv_kwargs)
+
+
 def data_fingerprint(series: pd.Series) -> str:
     """所选节点+时间轴的指纹；帮助识别模型是否用了不同数据。"""
-    canonical = series.to_frame().to_csv(index=True, date_format="%Y-%m-%dT%H:%M:%S%z",
-                                       float_format="%.17g", na_rep="NaN", lineterminator="\n")
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return hashlib.sha256(_canonical_csv(series.to_frame()).encode("utf-8")).hexdigest()
+
+
+def wide_fingerprint(frame: pd.DataFrame) -> str:
+    """全部通道和时间轴的指纹。联合模型和单通道模型不要拿这个值互相比。"""
+    return hashlib.sha256(_canonical_csv(frame).encode("utf-8")).hexdigest()
 
 
 def environment_versions() -> dict[str, str]:
